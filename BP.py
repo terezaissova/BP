@@ -10,44 +10,43 @@ i = sp.I
 
 # definice konkrétních hodnot
 L_val = 1
-SA_val = sp.pi
-SB_val = 4 * sp.pi
-S0_val = sp.pi
-Sd_val = sp.pi # průřez poruchy
+rA_val = 1
+rB_val = 2
+r0_val = 1
 c0 = 343
 rho0 = 1.21
 Z0_val = rho0 * c0
 N = 10
 
-def substitute_matrix(matrix, length, area):
+def substitute_matrix(matrix, length, radius):
     """
     Vezme obecnou matici M a dosadí za symboly L a S konkrétní hodnoty.
     """
-    return matrix.subs({L: length, S: area})
+    return matrix.subs({L: length, S: sp.pi * radius**2})
 
 def matrix_one_cell(M):
     """
     Vytvoří matici přenosu pro jednu buňku.
     """
-    M1 = substitute_matrix(M, L_val / 4, SA_val)
-    M2 = substitute_matrix(M, L_val / 2, SB_val)
-    M3 = substitute_matrix(M, L_val / 4, SA_val)
+    M1 = substitute_matrix(M, L_val / 4, rA_val)
+    M2 = substitute_matrix(M, L_val / 2, rB_val)
+    M3 = substitute_matrix(M, L_val / 4, rA_val)
     M_cell = M1 * M2 * M3
     return M_cell
 
-def matrix_defect(M):
+def matrix_defect(M, L_def, r_def):
     """
     Vytvoří matici přenosu pro poruchu, takže rovnou rouru.
     """
-    M_def = substitute_matrix(M, L_val, Sd_val)
+    M_def = substitute_matrix(M, L_def, r_def)
     return M_def
 
-def matrix_complete(M, pos_def):
+def matrix_complete(M, pos_def, L_def, r_def):
     """
     Vytvoří matici kompletní struktury N+1 buněk s jednou poruchou na místě pos_def.
     """
     M_one_cell = matrix_one_cell(M)
-    M_def = matrix_defect(M)
+    M_def = matrix_defect(M, L_def, r_def)
     M_comp = matrix_power(M_one_cell, pos_def-1) @ M_def @ matrix_power(M_one_cell, N-pos_def+1)
     return M_comp
 
@@ -59,6 +58,7 @@ def get_transmission(M):
     M_12 = M[0, 1]
     M_21 = M[1, 0]
     M_22 = M[1, 1]
+    S0_val = sp.pi * r0_val**2
     numerator = 2 * S0_val * Z0_val * (M_11 * M_22 - M_12 * M_21)
     denominator = S0_val**2 * M_12 - S0_val * Z0_val * M_11 - S0_val * Z0_val * M_22 + Z0_val**2 * M_21
     t_sym = numerator / denominator
@@ -79,6 +79,61 @@ def plot_transmission(t, min, max):
     plt.legend()
     plt.show()
 
+def R_one_cell(s):
+    s = np.asarray(s)
+    cond1 = s < (1/4 * L_val)
+    cond2 = (s >= (1/4 * L_val)) & (s < (3/4 * L_val))
+    cond3 = s >= (3/4 * L_val)
+    return np.select([cond1, cond2, cond3], [rA_val, rB_val, rA_val], default=r0_val)
+
+def R_complete(s):
+    """
+    Vytvoří profil celé struktury:
+    - buňky před poruchou (pos_def - 1)
+    - porucha o délce L_def a poloměru r_def
+    - zbylé buňky za poruchou (N - pos_def + 1)
+    """
+    s = np.asarray(s)
+    R_vals = np.zeros_like(s, dtype=float)
+    
+    # Výpočet rozložení
+    cells_before = pos_def - 1
+    len_before = cells_before * L_val
+    
+    # 1. Část před poruchou
+    mask_before = s < len_before
+    # Modulo zajistí periodické opakování jedné buňky na požadované délce
+    R_vals[mask_before] = R_one_cell(s[mask_before] % L_val)
+    
+    # 2. Porucha
+    mask_def = (s >= len_before) & (s < len_before + L_def)
+    R_vals[mask_def] = r_def
+    
+    # 3. Část za poruchou
+    mask_after = s >= (len_before + L_def)
+    # Od hodnoty 's' odečteme délku předchozích částí, aby modulo opět počítalo od nuly
+    R_vals[mask_after] = R_one_cell((s[mask_after] - (len_before + L_def)) % L_val)
+    
+    return R_vals
+
+def plot_R_complete(pos_def, L_def, r_def):
+    # Celková délka odpovídá N normálním buňkám a 1 poruše
+    total_length = (N * L_val) + L_def
+    
+    s_vals = np.linspace(0, total_length, 8000)
+    R_vals = R_complete(s_vals)
+
+    plt.figure(figsize=(12, 4))
+    plt.plot(s_vals, R_vals, color='darkred')
+    plt.title(f"Profil kompletní struktury (N={N} buněk, porucha na pozici {pos_def})")
+    plt.xlabel("s")
+    plt.ylabel("R", rotation=0)
+    plt.xlim(0, total_length)
+    
+    # Dynamické nastavení osy Y podle toho, který poloměr je největší
+    plt.ylim(0, max(rB_val, r_def) + 0.5)
+    plt.grid(True)
+    plt.show()
 
 # rovnice
 eq1 = sp.Eq(P0, C1 + C2)
@@ -126,7 +181,15 @@ t_n_cells = get_transmission(M_n_cells)
 plot_transmission(t_n_cells, 0, 5)
 
 # přenos pro N+1 buněk s jednou poruchou jako funkce k
-pos_def = 5 # pozice poruchy
-M_complete = matrix_complete(M, pos_def)
+# pozice buňky s poruchou
+pos_def = 3
+# délka buňky s poruchou
+L_def = 1
+# poloměr buňky s poruchou
+r_def = 3
+
+plot_R_complete(pos_def, L_def, r_def)
+
+M_complete = matrix_complete(M, pos_def, L_def, r_def)
 t_complete = get_transmission(M_complete)
 plot_transmission(t_complete, 0, 5)
