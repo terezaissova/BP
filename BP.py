@@ -1,7 +1,9 @@
 import sympy as sp
 import numpy as np
 import matplotlib.pyplot as plt
-from numpy.linalg import matrix_power
+import scipy.optimize as opt
+import scipy.integrate as spi
+# from numpy.linalg import matrix_power
 
 # definice symbolů (reálné a komplexní)
 k, L, Z0, S = sp.symbols('k L Z0 S', real=True)
@@ -30,24 +32,62 @@ def matrix_one_cell(M):
     """
     M1 = substitute_matrix(M, L_val / 4, rA_val)
     M2 = substitute_matrix(M, L_val / 2, rB_val)
-    M3 = substitute_matrix(M, L_val / 4, rA_val)
-    M_cell = M1 * M2 * M3
+    M_cell = M1 * M2 * M1
     return M_cell
 
-def matrix_defect(M, L_def, r_def):
+def matrix_power_chebyshev(M, n):
     """
-    Vytvoří matici přenosu pro poruchu, takže rovnou rouru.
+    Vypočítá n-tou mocninu 2x2 matice M (předpokládá se det(M) = 1)
+    pomocí Čebyševových polynomů.
     """
-    M_def = substitute_matrix(M, L_def, r_def)
-    return M_def
+    if n == 0:
+        return sp.eye(2)
+    if n == 1:
+        return M  
+    
+    # Polovina stopy matice 
+    x = (M[0, 0] + M[1, 1]) / 2
 
-def matrix_complete(M, pos_def, L_def, r_def):
+    # Rekurzivní generátor Čebyševova polynomu
+    def U(m):
+        if m < 0: return sp.S(0)
+        if m == 0: return sp.S(1)
+        u0, u1 = sp.S(1), 2 * x
+        for _ in range(1, m):
+            u0, u1 = u1, 2 * x * u1 - u0
+        return u1
+    
+    # Výpočet koeficientů
+    U_n_minus_1 = U(n - 1)
+    U_n_minus_2 = U(n - 2)
+
+    # Cayley-Hamilton
+    M_n = U_n_minus_1 * M - U_n_minus_2 * sp.eye(2)
+
+    return sp.Matrix(M_n)
+
+def matrix_complete(M, pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2):
     """
-    Vytvoří matici kompletní struktury N+1 buněk s jednou poruchou na místě pos_def.
+    Vytvoří matici kompletní struktury s N normálními buňkami a 2 poruchami.
+    pos_def1: pozice 1. poruchy
+    pos_def2: pozice 2. poruchy (musí být > pos_def1)
     """
     M_one_cell = matrix_one_cell(M)
-    M_def = matrix_defect(M, L_def, r_def)
-    M_comp = matrix_power(M_one_cell, pos_def-1) @ M_def @ matrix_power(M_one_cell, N-pos_def+1)
+    M_def1 = substitute_matrix(M, L_def1, r_def1)
+    M_def2 = substitute_matrix(M, L_def2, r_def2)
+    
+    # Počty normálních buněk v jednotlivých úsecích
+    cells_before_1 = pos_def1 - 1
+    cells_between = pos_def2 - pos_def1
+    cells_after_2 = N - pos_def2 + 1
+    
+    # Skládání matic
+    M_comp = (matrix_power_chebyshev(M_one_cell, cells_before_1) @ 
+              M_def1 @ 
+              matrix_power_chebyshev(M_one_cell, cells_between) @ 
+              M_def2 @ 
+              matrix_power_chebyshev(M_one_cell, cells_after_2))
+    
     return M_comp
 
 def get_transmission(M):
@@ -65,12 +105,15 @@ def get_transmission(M):
     T = t_sym.subs({Z0: Z0_val})
     return sp.lambdify(k, T, modules='numpy')
 
-def plot_transmission(t, min, max):
+def plot_transmission(t, min, max, root1=None, root2=None):
     k_vals = np.linspace(min, max, 1000)
     t_vals = t(k_vals)
     t_abs = np.abs(t_vals)
     plt.figure(figsize=(10, 5))
-    plt.plot(k_vals, t_abs, color='blue', label='|T|')
+    plt.plot(k_vals, t_abs, color='darkred', label='|T|')
+    if root1 is not None and root2 is not None:
+        plt.axvspan(root1, root2, color='navy', alpha=0.1)
+        plt.axvspan(1.05 * root1, 0.95 * root2, color='darkred', alpha=0.2)
     plt.title("Transmission")
     plt.xlabel("k")
     plt.ylabel("|T|", rotation=0)
@@ -86,54 +129,129 @@ def R_one_cell(s):
     cond3 = s >= (3/4 * L_val)
     return np.select([cond1, cond2, cond3], [rA_val, rB_val, rA_val], default=r0_val)
 
-def R_complete(s):
+def R_complete(s, pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2):
     """
-    Vytvoří profil celé struktury:
-    - buňky před poruchou (pos_def - 1)
-    - porucha o délce L_def a poloměru r_def
-    - zbylé buňky za poruchou (N - pos_def + 1)
+    Vytvoří profil celé struktury se 2 poruchami.
     """
     s = np.asarray(s)
     R_vals = np.zeros_like(s, dtype=float)
     
-    # Výpočet rozložení
-    cells_before = pos_def - 1
-    len_before = cells_before * L_val
+    # Počty normálních buněk v jednotlivých úsecích
+    cells_before_1 = pos_def1 - 1
+    cells_between = pos_def2 - pos_def1
     
-    # 1. Část před poruchou
-    mask_before = s < len_before
-    # Modulo zajistí periodické opakování jedné buňky na požadované délce
-    R_vals[mask_before] = R_one_cell(s[mask_before] % L_val)
+    # Délky k jednotlivým zlomům
+    len1 = cells_before_1 * L_val                # konec úseku před 1. poruchou
+    len2 = len1 + L_def1                         # konec 1. poruchy
+    len3 = len2 + (cells_between * L_val)        # konec úseku mezi poruchami
+    len4 = len3 + L_def2                         # konec 2. poruchy
     
-    # 2. Porucha
-    mask_def = (s >= len_before) & (s < len_before + L_def)
-    R_vals[mask_def] = r_def
+    # 1. Část před 1. poruchou
+    mask1 = s < len1
+    R_vals[mask1] = R_one_cell(s[mask1] % L_val)
     
-    # 3. Část za poruchou
-    mask_after = s >= (len_before + L_def)
-    # Od hodnoty 's' odečteme délku předchozích částí, aby modulo opět počítalo od nuly
-    R_vals[mask_after] = R_one_cell((s[mask_after] - (len_before + L_def)) % L_val)
+    # 2. První porucha
+    mask2 = (s >= len1) & (s < len2)
+    R_vals[mask2] = r_def1
+    
+    # 3. Část mezi poruchami
+    mask3 = (s >= len2) & (s < len3)
+    R_vals[mask3] = R_one_cell((s[mask3] - len2) % L_val)
+    
+    # 4. Druhá porucha
+    mask4 = (s >= len3) & (s < len4)
+    R_vals[mask4] = r_def2
+    
+    # 5. Část za 2. poruchou
+    mask5 = s >= len4
+    R_vals[mask5] = R_one_cell((s[mask5] - len4) % L_val)
     
     return R_vals
 
-def plot_R_complete(pos_def, L_def, r_def):
-    # Celková délka odpovídá N normálním buňkám a 1 poruše
-    total_length = (N * L_val) + L_def
+def plot_R_complete(pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2):
+    # Celková délka odpovídá N normálním buňkám a 2 poruchám
+    total_length = (N * L_val) + L_def1 + L_def2
     
     s_vals = np.linspace(0, total_length, 8000)
-    R_vals = R_complete(s_vals)
+    R_vals = R_complete(s_vals, pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2)
+
+    # Výpočet zlomových bodů pro určení polohy poruch
+    cells_before_1 = pos_def1 - 1
+    cells_between = pos_def2 - pos_def1
+    
+    len1 = cells_before_1 * L_val                # začátek 1. poruchy
+    len2 = len1 + L_def1                         # konec 1. poruchy
+    len3 = len2 + (cells_between * L_val)        # začátek 2. poruchy
+    len4 = len3 + L_def2                         # konec 2. poruchy
 
     plt.figure(figsize=(12, 4))
-    plt.plot(s_vals, R_vals, color='darkred')
-    plt.title(f"Profil kompletní struktury (N={N} buněk, porucha na pozici {pos_def})")
+    
+    # Vykreslení celé struktury jako základu (černě)
+    plt.plot(s_vals, R_vals, color='black', linewidth=1.5, label='Normální buňky')
+    
+    # Barevné překreslení poruch
+    mask_def1 = (s_vals >= len1) & (s_vals <= len2)
+    mask_def2 = (s_vals >= len3) & (s_vals <= len4)
+    
+    plt.plot(s_vals[mask_def1], R_vals[mask_def1], color='darkred', linewidth=3, label='1. porucha')
+    plt.plot(s_vals[mask_def2], R_vals[mask_def2], color='navy', linewidth=3, label='2. porucha')
+    
+    plt.fill_between(s_vals[mask_def1], 0, R_vals[mask_def1], color='darkred', alpha=0.1)
+    plt.fill_between(s_vals[mask_def2], 0, R_vals[mask_def2], color='navy', alpha=0.1)
+
+    plt.title(f"Profil kompletní struktury (N={N} buněk, poruchy na {pos_def1} a {pos_def2})")
     plt.xlabel("s")
     plt.ylabel("R", rotation=0)
     plt.xlim(0, total_length)
     
-    # Dynamické nastavení osy Y podle toho, který poloměr je největší
-    plt.ylim(0, max(rB_val, r_def) + 0.5)
+    # Dynamické nastavení osy Y
+    plt.ylim(0, max(rB_val, r_def1, r_def2) + 0.5)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+
+def get_xi(M):
+    """
+    Z matice jedné buňky vrátí poloviční stopu (xi = cos(qL)) jako funkci k.
+    """
+    xi_sym = (M[0, 0] + M[1, 1]) / 2
+    xi_sub = xi_sym.subs({Z0: Z0_val})
+
+    # Převod na numerickou funkci
+    return sp.lambdify(k, xi_sub, modules='numpy')
+
+def plot_bloch_phase(xi_func, min_k, max_k):
+    """
+    Vykreslí závislost poloviční stopy na k.
+    """
+    k_vals = np.linspace(min_k, max_k, 1000)
+    
+    # Lambdify může u symbolických výrazů vracet komplexní čísla s nulovou imag. částí
+    xi_vals = np.real(xi_func(k_vals))
+    
+    plt.figure(figsize=(12, 6))
+    plt.plot(k_vals, xi_vals, color = 'darkred', label=r'$\xi(k)$')
+    
+    plt.axhline(1, color='navy')
+    plt.axhline(-1, color='navy')
+    
+    plt.title("Blochova fáze")
+    plt.xlabel("k")
+    plt.ylabel(r"$\xi = \frac{1}{2}\mathrm{Tr}(M)$", rotation = 0)
+    plt.xlim(min_k, max_k)
+    plt.ylim(-2.5, 1.5)
     plt.grid(True)
     plt.show()
+
+def find_root_bisection(xi_func, k_min, k_max, target=-1):
+    """
+    Najde kořen rovnice xi(k) = target pomocí metody půlení intervalů.
+    """
+    f = lambda k_val: np.real(xi_func(k_val)) - target
+    # Použití bisekce se zadanou tolerancí
+    res = opt.root_scalar(f, bracket=[k_min, k_max], method='bisect', xtol=1e-12)
+    return res.root
+
 
 # rovnice
 eq1 = sp.Eq(P0, C1 + C2)
@@ -172,24 +290,44 @@ sp.pprint(M)
 
 # přenos pro jednu buňku jako funkce k
 M_one_cell = matrix_one_cell(M)
-t_one_cell = get_transmission(M_one_cell)
-plot_transmission(t_one_cell, 0, 10)
+# t_one_cell = get_transmission(M_one_cell)
+# plot_transmission(t_one_cell, 0, 10)
+
+# Výpočet a vykreslení Blochovy fáze
+xi_function = get_xi(M_one_cell)
+plot_bloch_phase(xi_function, 0, 10)
+
+# Hledání kořenů (interval pro band gap)
+root1 = find_root_bisection(xi_function, 1.5, 2.3, target=-1)
+print(f"Kořen 1: {root1}")
+root2 = find_root_bisection(xi_function, 4.1, 4.8, target=-1)
+print(f"Kořen 2: {root2}")
 
 # přenos pro N buněk jako funkce k
-M_n_cells = matrix_power(M_one_cell, N)
+M_n_cells = matrix_power_chebyshev(M_one_cell, N)
 t_n_cells = get_transmission(M_n_cells)
-plot_transmission(t_n_cells, 0, 5)
+plot_transmission(t_n_cells, 0, 5, root1, root2)
 
-# přenos pro N+1 buněk s jednou poruchou jako funkce k
-# pozice buňky s poruchou
-pos_def = 3
-# délka buňky s poruchou
-L_def = 1
-# poloměr buňky s poruchou
-r_def = 3
+# přenos pro N+2 buněk se dvěma poruchami jako funkce k
+# 1. porucha
+pos_def1 = 5   # od 1 do 11
+L_def1 = 1
+r_def1 = 1
 
-plot_R_complete(pos_def, L_def, r_def)
+# 2. porucha
+pos_def2 = 7  # (musí být >= pos_def1)
+L_def2 = 1.5
+r_def2 = 0.5 
 
-M_complete = matrix_complete(M, pos_def, L_def, r_def)
+# Vykreslení profilu struktury
+plot_R_complete(pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2)
+
+# Výpočet a vykreslení přenosu
+M_complete = matrix_complete(M, pos_def1, L_def1, r_def1, pos_def2, L_def2, r_def2)
 t_complete = get_transmission(M_complete)
-plot_transmission(t_complete, 0, 5)
+plot_transmission(t_complete, 0, 5, root1, root2)
+
+# Výpočet integrálu v band gapu
+func_abs_t = lambda k_val: np.abs(t_complete(k_val))
+integral_scipy, error = spi.quad(func_abs_t, 1.05*root1, 0.95*root2, limit=200)
+print(f"Integrál (SciPy): {integral_scipy}, odhad chyby: {error}")
